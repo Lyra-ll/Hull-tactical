@@ -1,0 +1,8 @@
+{
+    "hidden_dim": 192,
+    "encoding_dim": 40,
+    "n_hidden_layers": 2,
+    "dropout_rate": 0.1335577809466348,
+    "learning_rate": 0.0010879952492064253,
+    "recon_weight": 0.7023226945965941
+}
