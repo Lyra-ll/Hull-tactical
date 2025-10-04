@@ -271,11 +271,22 @@ def run_tuning(X, y, y_action, sample_weight, tune_target, config, utils):
         # 评估逻辑保持不变
         y_true_for_scoring = y_action.iloc[oof_valid_mask].values
         y_pred = oof_predictions_trial[oof_valid_mask]
-        
-        if y_true_for_scoring.shape[0] == 0: return 0.5
-        scores = [roc_auc_score(y_true_for_scoring[:, i], y_pred[:, i]) for i in range(y_true_for_scoring.shape[1])]
-        
-        return np.mean(scores)
+        weight_for_scoring = np.nan_to_num(sample_weight.iloc[oof_valid_mask].values, nan=0.0)
+        valid_weight_mask = weight_for_scoring > 0
+
+        if y_true_for_scoring.shape[0] == 0 or not valid_weight_mask.any(): return 0.5
+        y_true_filtered = y_true_for_scoring[valid_weight_mask]
+        y_pred_filtered = y_pred[valid_weight_mask]
+
+        scores = []
+        for i in range(y_true_filtered.shape[1]):
+            y_col = y_true_filtered[:, i]
+            if np.unique(y_col).size < 2:
+                scores.append(0.5)
+            else:
+                scores.append(roc_auc_score(y_col, y_pred_filtered[:, i]))
+
+        return float(np.mean(scores)) if scores else 0.5
     
     # ... (函数剩余的study.optimize部分无需修改) ...
     if tune_target == 'lgbm':
@@ -353,11 +364,25 @@ def run_validation(X, y, sample_weight, date_ids, config, utils):
 
     y_true_final = y[config.ACTION_COLUMNS].iloc[inference_indices]
     preds_final_df = pd.DataFrame(oof_predictions[inference_indices], index=y_true_final.index, columns=[f'pred_{c}' for c in config.TARGET_COLUMNS])
+    weights_final = np.nan_to_num(sample_weight.iloc[inference_indices].values, nan=0.0)
+    valid_weight_mask = weights_final > 0
+    if not valid_weight_mask.any():
+        print("  > Warning: no positive-weight samples available for OOF scoring; using all rows.")
+        y_true_eval = y_true_final
+        preds_eval_df = preds_final_df
+    else:
+        y_true_eval = y_true_final.iloc[valid_weight_mask]
+        preds_eval_df = preds_final_df.iloc[valid_weight_mask]
 
     scores = {}
     for i, action_col in enumerate(config.ACTION_COLUMNS):
         pred_col = f'pred_{config.TARGET_COLUMNS[i]}'
-        scores[action_col] = roc_auc_score(y_true_final[action_col], preds_final_df[pred_col])
+        y_true_col = y_true_eval[action_col]
+        y_pred_col = preds_eval_df[pred_col]
+        if y_true_col.nunique(dropna=True) < 2:
+            scores[action_col] = 0.5
+        else:
+            scores[action_col] = roc_auc_score(y_true_col, y_pred_col)
 
     for col, score in scores.items(): print(f"🎯 OOF AUC for '{col}': {score:.8f}")
     print("-" * 60 + f"\n🏆 最终OOF平均AUC: {np.mean(list(scores.values())):.8f}\n" + "-" * 60)
@@ -369,7 +394,7 @@ def run_validation(X, y, sample_weight, date_ids, config, utils):
 # [核心修复] 彻底重构Holdout模式，确保数据处理流程100%统一
 # [V3 - 诊断优先版] 重构Holdout模式，实现最终的内部验证与外部持有对比
 # [V2.9 DLS修复版]
-def run_holdout_validation(X_train_full, y_train_full, sw_train_full, X_holdout, y_holdout, config, utils):
+def run_holdout_validation(X_train_full, y_train_full, sw_train_full, X_holdout, y_holdout, sw_holdout, config, utils):
     device = torch.device("cpu")  # 强制使用CPU，避免CUDA设备不一致
     print("\n" + "="*20 + " 启动 'HOLDOUT' 最终审判模式 (V2.9 DLS修复版) " + "="*20)
     try:
@@ -432,6 +457,12 @@ def run_holdout_validation(X_train_full, y_train_full, sw_train_full, X_holdout,
 
     print("\n--- 6. 正在训练最终LGBM回归模型并进行两场评估 ---")
     val_scores, holdout_scores = {}, {}
+    val_weights = np.nan_to_num(sw_final_val.values, nan=0.0)
+    val_valid_mask = val_weights > 0
+    holdout_weights = np.nan_to_num(sw_holdout.values, nan=0.0)
+    holdout_valid_mask = holdout_weights > 0
+    if not val_valid_mask.any(): print('  > Warning: no positive-weight samples in internal validation; using all rows.')
+    if not holdout_valid_mask.any(): print('  > Warning: no positive-weight samples in holdout; using all rows.')
     for i, target_col in enumerate(config.TARGET_COLUMNS):
         action_col = config.ACTION_COLUMNS[i]
         print(f"  > 正在训练 '{target_col}' 并用 '{action_col}' 评估...")
@@ -444,8 +475,12 @@ def run_holdout_validation(X_train_full, y_train_full, sw_train_full, X_holdout,
         holdout_preds = model.predict(X_holdout_final)
         
         # [核心修复] 评估时使用正确的 action 列
-        val_scores[action_col] = roc_auc_score(y_final_val[action_col], val_preds)
-        holdout_scores[action_col] = roc_auc_score(y_holdout[action_col], holdout_preds)
+        val_truth = y_final_val[action_col].values[val_valid_mask] if val_valid_mask.any() else y_final_val[action_col].values
+        val_pred = val_preds[val_valid_mask] if val_valid_mask.any() else val_preds
+        holdout_truth = y_holdout[action_col].values[holdout_valid_mask] if holdout_valid_mask.any() else y_holdout[action_col].values
+        holdout_pred = holdout_preds[holdout_valid_mask] if holdout_valid_mask.any() else holdout_preds
+        val_scores[action_col] = 0.5 if np.unique(val_truth).size < 2 else roc_auc_score(val_truth, val_pred)
+        holdout_scores[action_col] = 0.5 if np.unique(holdout_truth).size < 2 else roc_auc_score(holdout_truth, holdout_pred)
 
     print(f"\n\n{'='*25} 最终审判日结果对比 {'='*25}")
     print("\n--- 内部验证集 (考前模拟) 成绩 ---")
@@ -538,13 +573,17 @@ if __name__ == '__main__':
     if args.mode == 'holdout':
         print(f"  > [Holdout模式] 正在加载持有集: '{config_module.HOLDOUT_DATA_FILE}'")
         holdout_df = utils.load_data(config_module.HOLDOUT_DATA_FILE, -1) # holdout不筛选date_id
+        if 'sample_weight' in holdout_df.columns:
+            sample_weight_holdout = holdout_df['sample_weight'].fillna(0.0)
+        else:
+            sample_weight_holdout = holdout_df[config_module.RESP_COLUMNS].abs().sum(axis=1).fillna(0.0)
         
         X_holdout = holdout_df[top_features]
         # holdout的y也需要包含所有目标列
         y_holdout_all = holdout_df[config_module.TARGET_COLUMNS + config_module.ACTION_COLUMNS]
         
         # 调用已升级的 run_holdout_validation 函数
-        run_holdout_validation(X_dev, y_dev_all, sample_weight_dev, X_holdout, y_holdout_all, config_module, utils)
+        run_holdout_validation(X_dev, y_dev_all, sample_weight_dev, X_holdout, y_holdout_all, sample_weight_holdout, config_module, utils)
     
     elif args.mode == 'rfe':
         # rfe 只需要软目标或硬目标之一即可，这里用软目标保持一致

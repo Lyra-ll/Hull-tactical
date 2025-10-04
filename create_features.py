@@ -10,6 +10,11 @@ import numpy as np
 
 warnings.filterwarnings('ignore', category=pd.errors.PerformanceWarning)
 
+# Time-decay parameters
+USE_TIME_DECAY = True
+TIME_DECAY_HALF_LIFE = 365  # approximately one year
+TIME_DECAY_COLUMN = 'date_id'
+
 # --- 手工特征生成逻辑 (您的“特征兵工厂”) ---
 def create_manual_features(df, top_n_base_features):
     #接收一个dataframe和之前决定的最优秀的基础特征，来生产手工特征
@@ -42,6 +47,49 @@ def create_manual_features(df, top_n_base_features):
     print(f"  > ✅ 手工特征生产完成。")
     return df_eng
 
+def apply_time_decay_factor(df, weight_col):
+    """Apply exponential time-decay on sample weights based on a date column."""
+    if not USE_TIME_DECAY:
+        return df
+    if TIME_DECAY_COLUMN not in df.columns:
+        print(f"    > Warning: column '{TIME_DECAY_COLUMN}' not found; skip time decay.")
+        return df
+    if TIME_DECAY_HALF_LIFE <= 0:
+        print("    > Warning: TIME_DECAY_HALF_LIFE <= 0; skip time decay.")
+        return df
+
+    date_series = df[TIME_DECAY_COLUMN]
+    distance = None
+
+    if pd.api.types.is_datetime64_any_dtype(date_series):
+        max_point = date_series.max()
+        distance = (max_point - date_series).dt.days
+    else:
+        parsed = pd.to_datetime(date_series, errors='coerce')
+        if parsed.notna().any():
+            max_point = parsed.max()
+            distance = (max_point - parsed).dt.days
+        else:
+            numeric = pd.to_numeric(date_series, errors='coerce')
+            if numeric.notna().any():
+                max_point = numeric.max()
+                distance = max_point - numeric
+            else:
+                print("    > Warning: unable to parse time column; skip time decay.")
+                return df
+
+    distance = pd.Series(distance).fillna(distance.median()).astype(float)
+    decay = np.power(0.5, distance / TIME_DECAY_HALF_LIFE)
+
+    df[weight_col] = df[weight_col] * decay.values
+    df[f"{weight_col}_time_decay"] = decay.values
+    print(f"    > Applied time decay (half-life={TIME_DECAY_HALF_LIFE} days); recent rows receive higher weight.")
+    return df
+
+
+
+
+
 def create_safe_sample_weights(df, resp_columns):
     """
     [冠军策略修复版] 基于未来多个原始收益列的绝对值之和，创建样本权重。
@@ -63,6 +111,7 @@ def create_safe_sample_weights(df, resp_columns):
     # 新的、更推荐的写法:
     df_with_weights['sample_weight'] = df_with_weights['sample_weight'].fillna(0)
     # --- [修复结束] ---
+    df_with_weights = apply_time_decay_factor(df_with_weights, 'sample_weight')
 
     print("  > ✅ 已生成 'sample_weight' 列 (基于冠军策略)。")
     return df_with_weights
@@ -104,17 +153,24 @@ def create_multi_horizon_targets(df, processing_mode):
             
     for horizon in TARGET_HORIZONS:
         shifted_returns = []
-        if processing_mode == 'train':
-            for i in range(1, horizon + 1):
-                shifted_returns.append(df_with_targets[source_return_col].shift(-i))
-        
-        elif processing_mode == 'test':
-            for i in range(0, horizon):
-                shifted_returns.append(df_with_targets[source_return_col].shift(-i))
 
-        multi_day_return = pd.concat(shifted_returns, axis=1).sum(axis=1)
+        # [关键修复] 根据收益列类型调整起点：
+        #  - forward_returns 已与当前行对齐，应从 i=0 开始累加；
+        #  - lagged_forward_returns 落后一天，需要从 i=1 开始推进才能回到当前行的未来收益。
+        if source_return_col == 'lagged_forward_returns':
+            shift_start = 1
+        else:
+            shift_start = 0
 
-        # 1. 创建原始收益列 (resp)
+        for i in range(shift_start, shift_start + horizon):
+            shifted_returns.append(df_with_targets[source_return_col].shift(-i))
+
+        multi_day_matrix = pd.concat(shifted_returns, axis=1)
+
+        # 当未来天数不足 horizon 时强制输出 NaN，避免被截断的收益混入标签
+        multi_day_return = multi_day_matrix.sum(axis=1, min_count=horizon)
+
+        # 1. 创建原始收益列(resp)
         resp_col_name = f'resp_{horizon}d'
         df_with_targets[resp_col_name] = multi_day_return
         
@@ -180,6 +236,7 @@ if __name__ == '__main__':
 
     MAX_LOOKBACK_WINDOW = 60
     resp_cols = [f'resp_{h}d' for h in [1, 3, 5]]
+
     target_cols_to_check = resp_cols
 
     # --- 后续所有流程 (流程A, 流程B) 保持完全不变 ---

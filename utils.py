@@ -1,4 +1,4 @@
-# utils.py
+﻿# utils.py
 # =================================================================
 # 项目通用工具函数库 V2.6 (终极统一修复版)
 # =================================================================
@@ -30,6 +30,30 @@ def load_data(raw_file, start_date_id):
     modern_df = raw_df[raw_df['date_id'] >= start_date_id].copy().reset_index(drop=True)
     print(f"  > 筛选 date_id >= {start_date_id} 后，剩余 {len(modern_df)} 行。")
     return modern_df
+
+def _resolve_loss_weights(ae_params, n_targets, device):
+    """
+    根据 AutoEncoder 的配置生成用于监督损失的权重向量。
+
+    旧实现假定 ``loss_weights`` 总是长度为3，这在目标数量发生变化
+    （例如仅训练一个目标）时会触发运行时的 shape mismatch 错误。
+    该辅助函数会根据当前目标数量安全地构建一个张量：
+
+    * 如果 ``ae_params`` 未提供权重，则返回均匀权重。
+    * 如果提供的权重长度与 ``n_targets`` 不一致，则发出警告并退回均匀权重。
+    * 否则返回用户配置的权重。
+    """
+
+    loss_weights_config = ae_params.get('loss_weights') if ae_params else None
+    if loss_weights_config is None:
+        return torch.full((n_targets,), 1.0 / max(n_targets, 1), device=device)
+
+    loss_weights_tensor = torch.tensor(loss_weights_config, dtype=torch.float32, device=device)
+    if loss_weights_tensor.numel() != n_targets:
+        print("      - ⚠️ loss_weights 长度与目标数量不匹配，已自动回退为均匀权重。")
+        return torch.full((n_targets,), 1.0 / max(n_targets, 1), device=device)
+
+    return loss_weights_tensor
 
 # [核心修复] 引入职责分离的预处理器函数
 def get_preprocessor_params(X_train):
@@ -151,7 +175,15 @@ def train_fold_ae(ae_params, X_train_scaled_np, y_train_np, sw_train_np, X_val_s
         print(f"    > [AE] Seed {seed_idx+1}/{len(seeds)} (seed={seed}) 开始训练...")
         set_global_seeds(seed)
         # 优化CPU模式DataLoader配置
-        train_loader = DataLoader(train_dataset, batch_size=128, shuffle=False, num_workers=0, pin_memory=False, persistent_workers=False)
+        num_workers = ae_params.get('num_workers', 0)
+        train_loader = DataLoader(
+            train_dataset,
+            batch_size=128,
+            shuffle=False,
+            num_workers=num_workers,
+            pin_memory=False,
+            persistent_workers=bool(num_workers)
+        )
         
         model_params = { 'hidden_dim': ae_params['hidden_dim'], 'encoding_dim': ae_params['encoding_dim'], 'n_hidden_layers': ae_params['n_hidden_layers'], 'dropout_rate': ae_params['dropout_rate'], 'bn': ae_params.get('bn', True) }
         
@@ -170,8 +202,8 @@ def train_fold_ae(ae_params, X_train_scaled_np, y_train_np, sw_train_np, X_val_s
         # --- [修改结束] ---
         
         epochs, patience, epochs_no_improve, best_state, min_loss = 100, 7, 0, None, np.inf
-        # [健壮性修复] 从参数中读取损失权重，避免硬编码
-        loss_weights = torch.tensor(ae_params.get('loss_weights', [0.5, 0.3, 0.2]), device=device) 
+        # [健壮性修复] 根据目标数量动态解析损失权重，避免形状不匹配
+        loss_weights = _resolve_loss_weights(ae_params, n_targets, device)
         
         for epoch in range(epochs):
             model.train()

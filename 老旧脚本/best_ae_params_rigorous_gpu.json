@@ -1,7 +1,0 @@
-{
-    "hidden_dim": 72,
-    "encoding_dim": 19,
-    "learning_rate": 0.0014670066051957222,
-    "dropout_rate": 0.2587342759919066,
-    "recon_weight": 0.10067267214718378
-}

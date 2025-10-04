@@ -1,5 +1,4 @@
-# 1. 创建包含所有特征的主训练文件
-python create_features.py --input train.csv --output train_final_features.csv
+
 # 2. 创建包含所有特征的持有期验证文件
 python create_features.py --input test.csv --output test_final_features.csv
 
@@ -77,7 +76,9 @@ Paul Fornia (24th Place) 方案知识点浓缩 (可用于README)
 
 效果: 在保留重要样本影响力的同时，平滑了极端值，让CV分数更稳定、更可靠 。
 
-
+####
+analyze signal to noise使用：
+python analyze_signal_to_noise.py --input train_final_features.csv
 
 
 

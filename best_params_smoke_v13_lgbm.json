@@ -1,7 +1,9 @@
 {
-    "learning_rate": 0.03436829318347571,
-    "n_estimators": 2555,
-    "num_leaves": 52,
-    "reg_alpha": 0.018519239050037963,
-    "reg_lambda": 12.498987274272395
+    "learning_rate": 0.012797333640436398,
+    "n_estimators": 720,
+    "num_leaves": 16,
+    "reg_alpha": 0.0640577043323959,
+    "reg_lambda": 0.015615165094407055,
+    "colsample_bytree": 0.9944221981078964,
+    "subsample": 0.8382548697306671
 }
